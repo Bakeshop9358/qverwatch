@@ -1,0 +1,11 @@
+[Unit]
+Requires=network.target
+After=network.target
+
+[Service]
+User=pi
+WorkingDirectory=/home/pi/qverwatch
+ExecStart=/usr/bin/python3.9 /home/pi/qverwatch/app.py
+
+[Install]
+WantedBy=multi-user.target

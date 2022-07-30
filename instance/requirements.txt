@@ -1,0 +1,4 @@
+bottle
+psutil
+mcrcon
+python-dotenv
