@@ -1,16 +1,25 @@
 import discord
 import asyncio
-import requests
-from wakeonlan import send_magic_packet
 from discord.ext.commands import Bot
-from discord.ext import commands
+from discord.ext import commands, tasks
 import json
 from datetime import date, datetime
 from dateutil import tz
+from dateutil.relativedelta import relativedelta
 import os
-import utils as u
+import sys
 from enum import Enum
 from dotenv import load_dotenv
+import logging
+from Server import ServerController, states
+
+logger =logging.getLogger(__name__)
+logger.setLevel(logging.INFO)
+
+logging.basicConfig(level=logging.INFO)
+
+handler = logging.StreamHandler(stream=sys.stdout)
+logger.addHandler(handler)
 
 load_dotenv()
 
@@ -20,128 +29,178 @@ HYPERVISOR_MAC = os.getenv("HYPERVISOR_MAC")
 INSTANCE_IP = os.getenv("INSTANCE_IP")
 MC_SERVER_IP = os.getenv("MC_SERVER_IP")
 PREFIX = "."
-TIMEZONE = os.getenv("TIMEZONE")
-
+MAX_EMPTY_TIME = 10
 SERVER_API_ENDPOINT = "http://" + INSTANCE_IP + ":8080"
 
-timezone = tz.gettz(TIMEZONE)
+_TIMEZONE = os.getenv("TIMEZONE")
+TIMEZONE = tz.gettz(_TIMEZONE)
 
 bot = commands.Bot(command_prefix=PREFIX, description=":3c")
 
-class states(Enum):
-    OFF = 0
-    STARTING = 1
-    FAILED = 2
-    RUNNING  = 2
-    UNKNOWN = 3
+server = ServerController(host_ip=HYPERVISOR_IP, instance_ip=INSTANCE_IP, host_mac=HYPERVISOR_MAC)
 
-hypervisor_status = states.OFF
-instance_status = states.OFF
-server_status = states.OFF
-instance_api_status = states.OFF
-host_api = states.OFF
+last_alert_sent = datetime.now(tz=TIMEZONE)
+do_not_stop_until = datetime.now(tz=TIMEZONE)
 
-def check_status():
-    global hypervisor_status
-    global instance_api_status
-    global instance_status
-    global server_status
+#TODO: Cambios persistentes
+lock_id = None
+watchlist = []
 
-    hypervisor_response = u.ping(HYPERVISOR_IP)
+async def set_status():
+    icon = "🟢"
+    if lock_id != None:
+        icon = "🔒"
 
-    if hypervisor_response is not True:
-        print("Server is off")
-        hypervisor_status = states.OFF
-        return
-    
-    hypervisor_status = states.RUNNING
+    if server.server_status != states.RUNNING:
+        return await bot.change_presence(activity=discord.Game(name="💀"))
+    elif server.server_status == states.RUNNING:
 
-    instance_response = u.ping(INSTANCE_IP)
-    if instance_response is not True:
-        print("Instance is off")
-        instance_status = states.OFF
-        return
+        til_death = MAX_EMPTY_TIME - (datetime.now(tz=TIMEZONE) - server.last_time_with_players).total_seconds() / 60
+        if til_death < 0:
+            til_death = 0
+        base_status = f"{icon} { server.stats.playerCount }/{ server.stats.maxPlayers } 🐀"
+        if server.stats.playerCount == 0:
+            icon = "🟡"
+            base_status += f" { round(til_death, 1)} minutos restantes"
 
-    instance_status = states.RUNNING
-
-    try:
-        print("Trying api")
-        response = requests.get("http://" + INSTANCE_IP + ":8080/service_health")
-        response = response.json()
-
-        if response["server_status"] == True:
-            print("Server is running")
-            server_status = states.RUNNING
-
-    except Exception as e:
-        server_status = states.OFF
-        print(e)
-
-
-
+        return await bot.change_presence(activity=discord.Game(name=base_status))
 
 @bot.event
 async def on_ready():
-    await bot.change_presence(activity=discord.Game(name=":cacopog:"))
-    print(f"{bot.user} ready!")
+    await set_status()
+    check_health.start()
+    logger.info(f"{bot.user} ready!")
 
 @bot.command(brief="C ao6")
 async def xD(ctx):
     await ctx.send("xD")
+    await ctx.message.add_reaction("❎")
+    await ctx.message.add_reaction("🇩")
 
 @bot.command(brief=":3c")
 async def getip(ctx):
     await ctx.send(MC_SERVER_IP)
 
 @bot.command()
+async def lock(ctx):
+    global lock_id
+
+    if lock_id != None:
+        return await ctx.send(f"Ya existe un bloqueo.")
+    
+    lock_id = ctx.channel.id
+    return await ctx.message.add_reaction("🔒")
+
+@bot.command()
+async def unlock(ctx):
+    global lock_id
+    if lock_id == None:
+        return await ctx.send("No existe un bloqueo actual.")
+
+    if ctx.channel.id == lock_id:
+        lock_id = None
+        return await ctx.message.add_reaction("✅")
+
+    return await ctx.message.add_reaction("❌")    
+
+@bot.command()
 async def stats(ctx):
-    if server_status == states.OFF:
-        await ctx.send("El server está apagado")
-
-    response = requests.get(SERVER_API_ENDPOINT + "/stats").json()
-
-    playerCount = response["player_count"]
-    maxPlayers = response["max_players"]
-    player_list = response["list"]
-    str_list = "\r\n".join(player_list)
-    cpuUsage = response["cpu_percent"]
-    cpuCores = response["cores"]
-    memUsage = response["memory"]
-    dump = response["cpu_dump"]
+    
+    stats = server.get_status()
+    if stats.isRunning is False:
+        await ctx.message.add_reaction("🤨")
+        return await ctx.send("El server está apagado")
 
     msg = f"**Qué ta chendo?🤨**\n"
-    msg += f"{playerCount} de {maxPlayers} chibolos\n\n"
-    msg += str_list
-    msg += f"\n\n**Info de la machine 🤖**\n"
-    msg += f"CPU : { cpuUsage }% | { cpuCores } cores\n"
-    msg += f"Memoria : { memUsage }%\n"
+    msg += f"{stats.playerCount} de {stats.maxPlayers} chibolos\n\n"
+    msg += stats.get_string_list()
+    msg += f"\n**Info de la machine 🤖**\n"
+    msg += f"CPU : { stats.cpuUsage }% | { stats.cpuCores } cores\n"
+    msg += f"Memoria : { stats.memoryPercent }%\n"
+    msg += f"**Tiempo máximo de inactividad**: {MAX_EMPTY_TIME} minutos ({ round(stats.currentIdleTime, 2)} minutos actualmente) "
     
     await ctx.send(msg)
 
 @bot.command()
 async def start(ctx):
-    check_status()
-    if server_status == states.RUNNING:
-        await ctx.send("El sv ta up 🤨")
-    if hypervisor_status == states.OFF:
-        await ctx.send("Prendiendo server!")
-        send_magic_packet(HYPERVISOR_MAC)
+    global do_not_stop_until
+
+    if lock_id != None:
+        return await ctx.send(f"xD")
+
+    do_not_stop_until = datetime.now(tz=TIMEZONE)
+    check_health.start()
+    response = server.start_server()
+    if response is True:
+        await ctx.message.add_reaction("✅")
+
+    await ctx.message.add_reaction("🤨")
+    return
     
 @bot.command()
 async def shutdown(ctx):
-    check_status()
-    if server_status != states.OFF:
 
-        response = requests.get(SERVER_API_ENDPOINT + "/stats").json()
+    if lock_id != None:
+        return await ctx.send(f"No se puede ahora 🤨")
 
-        playerCount = response["player_count"]
-        player_list = response["list"]
-        str_list = "\r\n".join(player_list)
-        if playerCount > 0:
-            await ctx.send("No se puede apagar el server mientras hay chibolos conectados\n" + str_list)
-            return
-        requests.post("http://" + HYPERVISOR_IP + ":8080/shutdown")
-        await ctx.send("Señal enviada xD")
+    server.get_status()
+    if server.stats.playerCount > 0:
+        return await ctx.send("No se puede apagar el server con chibolos conectados:\n" + server.stats.get_string_list())
+    
+    response = server.shutdown()
+    if response:
+        return await ctx.message.add_reaction("✅")
 
-check_status()
+    return await ctx.message.add_reaction("❌")
+
+def add_subscription(channel_id):
+    global watchlist
+    if channel_id not in watchlist:
+        watchlist.append(channel_id)
+        return True
+    return False
+
+@bot.command()
+async def subscribe(ctx):
+    add_subscription(ctx.channel.id)
+    await ctx.message.add_reaction("✅")
+
+@bot.command()
+async def set_idle_time(ctx, arg1):
+    global MAX_EMPTY_TIME
+    try:
+        MAX_EMPTY_TIME = int(arg1)
+        await set_status()
+        return await ctx.message.add_reaction("👌")
+    except ValueError:
+        return await ctx.message.add_reaction("🤨")
+    
+
+@tasks.loop(seconds=30)
+async def check_health():
+    global last_alert_sent
+    server.get_status()
+    await set_status()
+    if server.server_status != states.RUNNING:
+        logger.info("El server no está up, cambiando estado del bot")
+        if datetime.now(tz=TIMEZONE) > do_not_stop_until:
+            logger.info("Deteniendo task")
+            check_health.stop()
+        return
+
+    if server.stats.playerCount == 0:
+        idle_time = (datetime.now(tz=TIMEZONE) - server.last_time_with_players).total_seconds() / 60 
+        time_from_last_alert = (datetime.now(tz=TIMEZONE) - last_alert_sent ).total_seconds() / 60
+        logger.info(f"{idle_time} minutos sin players, {time_from_last_alert} sin notificar")
+        if idle_time > MAX_EMPTY_TIME and time_from_last_alert > MAX_EMPTY_TIME: # Para evitar spam 
+            last_alert_sent = datetime.now(tz=TIMEZONE)
+            if lock_id == None:
+                for id in watchlist:
+                    channel = await bot.fetch_channel(id)
+                    await channel.send(f"Sv vacío por más de { MAX_EMPTY_TIME} minutos, apagando.")
+                logger.warning("Apagando servidor por inactividad")
+                server.shutdown()
+
+        
+
 bot.run(TOKEN)

@@ -5,6 +5,9 @@ from mcrcon import MCRcon
 from bottle import route, run, request, post, get
 import os
 from dotenv import load_dotenv
+from gevent import monkey
+
+monkey.patch_all()
 
 load_dotenv()
 
@@ -67,4 +70,4 @@ def service_health():
     }
 
 
-run(host="0.0.0.0", debug=True)
+run(host="0.0.0.0", debug=True, reloader=True, server="gevent", quiet=True)
