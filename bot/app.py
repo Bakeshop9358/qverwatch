@@ -132,7 +132,7 @@ async def start(ctx):
     check_health.start()
     response = server.start_server()
     if response is True:
-        await ctx.message.add_reaction("✅")
+        return await ctx.message.add_reaction("✅")
 
     await ctx.message.add_reaction("🤨")
     return
