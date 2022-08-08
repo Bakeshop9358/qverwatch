@@ -29,7 +29,7 @@ HYPERVISOR_MAC = os.getenv("HYPERVISOR_MAC")
 INSTANCE_IP = os.getenv("INSTANCE_IP")
 MC_SERVER_IP = os.getenv("MC_SERVER_IP")
 PREFIX = "."
-MAX_EMPTY_TIME = 10
+MAX_EMPTY_TIME = 25
 SERVER_API_ENDPOINT = "http://" + INSTANCE_IP + ":8080"
 
 _TIMEZONE = os.getenv("TIMEZONE")
@@ -111,13 +111,19 @@ async def stats(ctx):
         await ctx.message.add_reaction("🤨")
         return await ctx.send("El server está apagado")
 
+    idle_time_str = ""
+    if stats.currentIdleTime < 0:
+        idle_time_str = f"En configuración"
+    else:
+        idle_time_str = f"{ round(stats.currentIdleTime, 2) } actualmente"
+        
     msg = f"**Qué ta chendo?🤨**\n"
     msg += f"{stats.playerCount} de {stats.maxPlayers} chibolos\n\n"
     msg += stats.get_string_list()
     msg += f"\n**Info de la machine 🤖**\n"
     msg += f"CPU : { stats.cpuUsage }% | { stats.cpuCores } cores\n"
     msg += f"Memoria : { stats.memoryPercent }%\n"
-    msg += f"**Tiempo máximo de inactividad**: {MAX_EMPTY_TIME} minutos ({ round(stats.currentIdleTime, 2)} minutos actualmente) "
+    msg += f"**Tiempo máximo de inactividad**: {MAX_EMPTY_TIME} minutos ({ idle_time_str }) "
     
     await ctx.send(msg)
 
@@ -128,8 +134,13 @@ async def start(ctx):
     if lock_id != None:
         return await ctx.send(f"xD")
 
-    do_not_stop_until = datetime.now(tz=TIMEZONE)
-    check_health.start()
+    do_not_stop_until = datetime.now(tz=TIMEZONE) + relativedelta(minutes=5)
+    server.last_time_with_players = do_not_stop_until
+    
+    logger.info(f"Agregado tiempo de gracia hasta {do_not_stop_until}")
+    if check_health.is_running() is False:
+        logger.info("La tarea no está corriendo")
+        check_health.start()
     response = server.start_server()
     if response is True:
         return await ctx.message.add_reaction("✅")
@@ -181,18 +192,12 @@ async def check_health():
     global last_alert_sent
     server.get_status()
     await set_status()
-    if server.server_status != states.RUNNING:
-        logger.info("El server no está up, cambiando estado del bot")
-        if datetime.now(tz=TIMEZONE) > do_not_stop_until:
-            logger.info("Deteniendo task")
-            check_health.stop()
-        return
 
     if server.stats.playerCount == 0:
         idle_time = (datetime.now(tz=TIMEZONE) - server.last_time_with_players).total_seconds() / 60 
         time_from_last_alert = (datetime.now(tz=TIMEZONE) - last_alert_sent ).total_seconds() / 60
-        logger.info(f"{idle_time} minutos sin players, {time_from_last_alert} sin notificar")
-        if idle_time > MAX_EMPTY_TIME and time_from_last_alert > MAX_EMPTY_TIME: # Para evitar spam 
+        logger.info(f"{idle_time} minutos sin players, {time_from_last_alert} sin notificar, no detener hasta { do_not_stop_until } vs { datetime.now(tz=TIMEZONE) }")
+        if idle_time > MAX_EMPTY_TIME and time_from_last_alert > MAX_EMPTY_TIME and do_not_stop_until > datetime.now(tz=TIMEZONE): # Para evitar spam 
             last_alert_sent = datetime.now(tz=TIMEZONE)
             if lock_id == None:
                 for id in watchlist:
